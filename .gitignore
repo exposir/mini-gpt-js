@@ -1,0 +1,11 @@
+# 权重文件（训练产物，体积大；*.json 也超 GitHub 100MB 限制）
+*.bin
+poet-weights*.json
+poet-weights*.bak
+
+# 日志与临时文件
+*.log
+*.bak
+
+# 依赖
+node_modules/
