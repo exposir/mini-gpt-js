@@ -1,5 +1,5 @@
 // verify-corpus.js —— 核对语料切换后的装载、字表、切分是否正常
-import * as D from "./data-split.js";
+import * as D from "../data-split.js";
 
 console.log(`语料: ${D.CORPUS_NAME}`);
 console.log(`  ${D.POEMS.length.toLocaleString()} 首  ${D.POEMS.join("").length.toLocaleString()} 字  词表 ${D.chars.length}`);

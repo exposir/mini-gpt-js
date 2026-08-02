@@ -1,6 +1,6 @@
 // 验收：生成 + 原创性抽检（600k 成品 vs 300k 快照通用）
-const m = require("./mini-gpt-poet.js");
-const POEMS = require("./poems.js");
+const m = require("../cpu/mini-gpt-poet.js");
+const POEMS = require("../data/poems.js");
 const corpus = POEMS.join("|");
 const model = new m.MiniGPT(m.CFG);
 m.loadWeights(model);

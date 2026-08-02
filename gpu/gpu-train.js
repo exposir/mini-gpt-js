@@ -15,7 +15,7 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 // 语料、词表、训练/验证切分统一从这里来（切分逻辑单一来源，防止各处抄错）
 // 注意取的是 *_IDX（下标数组），uploadBatch 靠下标去 POEMS 里取诗
-import { POEMS, chars, stoi, encode, TRAIN_IDX as TRAIN, VAL_IDX as VAL, CORPUS_NAME } from "./data-split.js";
+import { POEMS, chars, stoi, encode, TRAIN_IDX as TRAIN, VAL_IDX as VAL, CORPUS_NAME } from "../data/data-split.js";
 
 // ---------- 配置 ----------
 const CFG = { vocabSize: chars.length, blockSize: 66, nLayer: 10, nHead: 10, nEmbd: 640 };
@@ -26,10 +26,10 @@ const PAD = 0xffffffff;          // 目标位哨兵值：超出词表即视为 p
 const BASE_LR = 5e-4;            // 640 维大模型配小学习率（1e-3 在 10 万步实测平台震荡）
 // 权重文件前缀可由第 2 个参数指定，避免覆盖线上正式权重
 const PREFIX = Deno.args[1] || "poet-weights";
-const WEIGHTS = new URL(`./${PREFIX}.json`, import.meta.url).pathname;   // 仅兼容旧档
-const META = new URL(`./${PREFIX}.meta.json`, import.meta.url).pathname;
-const BIN = new URL(`./${PREFIX}.bin`, import.meta.url).pathname;
-const CURVE = new URL(`./${PREFIX}-curve.csv`, import.meta.url).pathname;
+const WEIGHTS = new URL(`../weights/${PREFIX}.json`, import.meta.url).pathname;   // 仅兼容旧档
+const META = new URL(`../weights/${PREFIX}.meta.json`, import.meta.url).pathname;
+const BIN = new URL(`../weights/${PREFIX}.bin`, import.meta.url).pathname;
+const CURVE = new URL(`../weights/${PREFIX}-curve.csv`, import.meta.url).pathname;
 const EVAL_EVERY = Number(Deno.args[2]) || 25000;   // 每 2.5 万步在验证集上评一次
 
 // ============================================================
@@ -738,7 +738,7 @@ if (haveWeights) {
   if (!cpuOk) {
     console.log(`  语料为 ${CORPUS_NAME}，字表与 CPU 引擎不同，跳过 CPU 对拍`);
   } else {
-    const cpu = require("./mini-gpt-poet.js");
+    const cpu = require("../cpu/mini-gpt-poet.js");
     const cpuModel = new cpu.MiniGPT(cpu.CFG);
     if (haveWeights) cpu.loadWeights(cpuModel);
     const ids0 = encode("\n" + POEMS[0] + "\n");
@@ -886,6 +886,11 @@ if (startStep >= totalSteps) {
   await saveWeights(totalSteps, totalSteps);
   const hrs = (performance.now() - t0) / 3600000;
   console.log(`\n训练完成，耗时 ${(hrs * 60).toFixed(1)} 分钟`);
-  console.log(`验证集最优: step ${bestStep}  val loss ${bestVal.toFixed(4)}  →  ${PREFIX}-best.bin`);
+  // 跑得比评估间隔还短时一次评估都没发生，别报一个不存在的 best
+  if (Number.isFinite(bestVal)) {
+    console.log(`验证集最优: step ${bestStep}  val loss ${bestVal.toFixed(4)}  →  ${PREFIX}-best.bin`);
+  } else {
+    console.log(`本次未触发验证（总步数 < 评估间隔 ${EVAL_EVERY}），无 best 快照`);
+  }
   console.log(`双曲线数据: ${PREFIX}-curve.csv`);
 }

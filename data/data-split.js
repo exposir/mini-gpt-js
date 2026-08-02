@@ -26,6 +26,7 @@ function envCorpus() {
   } catch { return undefined; }
 }
 export const CORPUS_NAME = envCorpus() || "poems.js";
+export const SEED = 20260729;      // 固定种子，任何时候重跑都是同一批诗
 
 function loadCorpus(name) {
   const url = new URL(`./${name}`, import.meta.url);
@@ -36,24 +37,17 @@ function loadCorpus(name) {
   return require(`./${name}`);
 }
 
-export const POEMS = loadCorpus(CORPUS_NAME);
-
-// ---------- 词表 ----------
-const corpus = "\n" + POEMS.join("\n") + "\n";
-export const chars = [...new Set(corpus)].sort();
-export const stoi = Object.fromEntries(chars.map((c, i) => [c, i]));
-export const encode = (s) => [...s].map((c) => stoi[c]);
-
-// ---------- 训练/验证切分 ----------
-// 验证集取 2%，但上下都卡住并对齐 batch size 32：
-//   下限 704（唐诗语料正好是 704，保持与 v2 那一炉的曲线可比）
-//   上限 1600（=50 个 batch）——再多也不会更准，只是拖慢评估：
-//   语料涨到 24 万首时 2% 是 4896 首，一次评估要 153 个 batch、约 115 秒。
-export const VAL_N = Math.min(1600, Math.max(704, Math.floor(POEMS.length * 0.02 / 32) * 32));
-export const SEED = 20260729;      // 固定种子，任何时候重跑都是同一批诗
-
-const shuffled = (() => {
-  const idx = POEMS.map((_, i) => i);
+// ---------- 按语料名构造完整切分（带缓存）----------
+// 对拍不同语料训出的模型时需要同时拿两套字表与切分：
+// v2 用唐诗 6379 字表，v3 用唐+宋 9064 字表，模块级单例担不了这个。
+const _cache = new Map();
+export function loadSplit(name) {
+  if (_cache.has(name)) return _cache.get(name);
+  const poems = loadCorpus(name);
+  const chars = [...new Set("\n" + poems.join("\n") + "\n")].sort();
+  const stoi = Object.fromEntries(chars.map((c, i) => [c, i]));
+  const valN = Math.min(1600, Math.max(704, Math.floor(poems.length * 0.02 / 32) * 32));
+  const idx = poems.map((_, i) => i);
   let s = SEED;
   const rnd = () => {               // mulberry32：Math.imul 保证 32 位不丢精度
     s |= 0; s = (s + 0x6d2b79f5) | 0;
@@ -65,17 +59,38 @@ const shuffled = (() => {
     const j = Math.floor(rnd() * (i + 1));
     [idx[i], idx[j]] = [idx[j], idx[i]];
   }
-  return idx;
-})();
-
-export const VAL_IDX = shuffled.slice(0, VAL_N);      // 留出，全程不参与训练
-export const TRAIN_IDX = shuffled.slice(VAL_N);
-export const VAL = VAL_IDX.map((i) => POEMS[i]);
-export const TRAIN = TRAIN_IDX.map((i) => POEMS[i]);
-
-// 判断某句是否抄自训练集（原创性抽检用）
-const TRAIN_SET = new Set(TRAIN);
-export function isInTrain(line) {
-  for (const p of TRAIN_SET) if (p.includes(line)) return true;
-  return false;
+  const valIdx = idx.slice(0, valN), trainIdx = idx.slice(valN);
+  const train = trainIdx.map((i) => poems[i]);
+  const trainSet = new Set(train);
+  const r = {
+    name, POEMS: poems, chars, stoi, VAL_N: valN,
+    encode: (str) => [...str].map((c) => stoi[c]),
+    VAL_IDX: valIdx, TRAIN_IDX: trainIdx,
+    VAL: valIdx.map((i) => poems[i]), TRAIN: train,
+    isInTrain: (line) => {
+      for (const p of trainSet) if (p.includes(line)) return true;
+      return false;
+    },
+  };
+  _cache.set(name, r);
+  return r;
 }
+
+// 默认切分（按 CORPUS_NAME）——以下具名导出保持旧调用方不变
+const _def = loadSplit(CORPUS_NAME);
+export const POEMS = _def.POEMS;
+export const chars = _def.chars;
+export const stoi = _def.stoi;
+export const encode = _def.encode;
+export const VAL_N = _def.VAL_N;
+export const VAL_IDX = _def.VAL_IDX;
+export const TRAIN_IDX = _def.TRAIN_IDX;
+export const VAL = _def.VAL;
+export const TRAIN = _def.TRAIN;
+export const isInTrain = _def.isInTrain;
+
+// 权重文件对应的语料：新版 meta 自带 corpus 字段，旧版（v1/v2）没有，那时只有唐诗。
+export function splitForMeta(meta) {
+  return loadSplit(meta.corpus || "poems.js");
+}
+

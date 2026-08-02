@@ -1,19 +1,19 @@
 // test-forward.js —— GPU 推理模块数值对拍（vs CPU forward）
 import { createRequire } from "node:module";
-import { createPoet } from "./webgpu-forward.js";
+import { createPoet } from "../gpu/webgpu-forward.js";
 const require = createRequire(import.meta.url);
 
-const POEMS = require("./poems.js");
+const POEMS = require("../data/poems.js");
 const corpus = "\n" + POEMS.join("\n") + "\n";
 const chars = [...new Set(corpus)].sort();
 
-const meta = JSON.parse(Deno.readTextFileSync("./poet-weights.meta.json"));
-const bin = Deno.readFileSync("./poet-weights.bin");
+const meta = JSON.parse(Deno.readTextFileSync(new URL("../weights/poet-weights.meta.json", import.meta.url)));
+const bin = Deno.readFileSync(new URL("../weights/poet-weights.bin", import.meta.url));
 const poet = await createPoet(meta, bin.buffer, chars);
 console.log("GPU 推理模块就绪");
 
 // 数值对拍：同一上下文的 logits 前 5 名应与 CPU 一致
-const cpu = require("./mini-gpt-poet.js");
+const cpu = require("../cpu/mini-gpt-poet.js");
 const cpuModel = new cpu.MiniGPT(cpu.CFG);
 cpu.loadWeights(cpuModel);
 const ctx = cpu.encode("\n床前明月光，");

@@ -11,7 +11,7 @@ const path = require("path");
 const OpenCC = require("opencc-js");
 
 const TARGET = Number(process.argv[2]) || 400;
-const POEMS_FILE = path.join(__dirname, "poems.js");
+const POEMS_FILE = path.join(__dirname, "../poems.js");
 
 // 繁体 → 简体转换器
 const toCN = OpenCC.Converter({ from: "t", to: "cn" });

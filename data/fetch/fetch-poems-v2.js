@@ -10,7 +10,7 @@ const fs = require("fs");
 const path = require("path");
 const OpenCC = require("opencc-js");
 
-const POEMS_FILE = path.join(__dirname, "poems.js");
+const POEMS_FILE = path.join(__dirname, "../poems.js");
 const toCN = OpenCC.Converter({ from: "t", to: "cn" });
 
 const MIRRORS = [

@@ -11,7 +11,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const WEIGHTS = path.join(__dirname, "poet-weights.json");
+const WEIGHTS = path.join(__dirname, "../weights/poet-weights.json");
 
 // WASM SIMD 矩阵乘核（编译/自检失败会自动回退纯 JS）
 const wasmKernel = require("./wasm-kernel.js");
@@ -368,7 +368,7 @@ class Adam {
 
 // ---------- 6. 训练语料：经典五言绝句（公版），见 poems.js ----------
 
-const POEMS = require("./poems.js");
+const POEMS = require("../data/poems.js");
 
 // 每首诗前后加换行符作为"开始/结束"标记
 const corpus = "\n" + POEMS.join("\n") + "\n";

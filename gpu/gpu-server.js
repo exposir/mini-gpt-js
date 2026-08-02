@@ -5,36 +5,40 @@
 // 浏览器: 页面提供「本地模式」——下载权重后在你的浏览器里
 //         用同一份 webgpu-forward.js 就地推理，断网也能作诗
 //
-// 启动: deno run --no-code-cache --allow-read --allow-net gpu-server.js [端口]
+// 启动: deno run --no-code-cache --allow-read --allow-net --allow-env gpu/gpu-server.js [端口]
 // ============================================================
 
-import { createPoet } from "./webgpu-forward.js";
-import { chars, stoi } from "./data-split.js";
+import { loadModel } from "./load-model.js";
 
 const PORT = Number(Deno.args[0]) || 8888;
 
-// 两个模型并存，网页上可切。不是为了好玩——两者的差异本身就是结论：
-// 验证集曲线证明 17.5 万步是泛化最优点，35 万步已过拐点、记忆探针测出 20% 背诵率。
+// 三个模型并存，网页上可切。不是为了好玩——三者的差异就是两个结论：
+//   gen vs small 是语料规模的对照（同为泛化最优点，语料差 6.4 倍）
+//   gen vs over 是过拟合的对照（同一炉的拐点与终态）
 const MODELS = {
   gen: {
-    prefix: "poet-weights-v2-best",
-    name: "泛化最优 (17.5 万步)",
-    note: "val loss 4.51，记忆探针 0% —— 它在真作，但用词较寡淡",
+    prefix: "poet-weights-v3-best",
+    name: "当前最优 · 唐宋 110 万步",
+    note: "1009 万字语料，val loss 4.04，重复率 1.5%（真诗 1.9%）",
   },
-  mem: {
-    prefix: "poet-weights",
-    name: "旧版 (35 万步)",
-    note: "已过拐点，val loss 5.31，记忆探针 20% —— 词汇丰富但会背原句",
+  small: {
+    prefix: "poet-weights-v2-best",
+    name: "小语料对照 · 唐诗 17.5 万步",
+    note: "157 万字语料，val loss 4.51 —— 同样是泛化最优点，但用词明显寡淡",
+  },
+  over: {
+    prefix: "poet-weights-v3",
+    name: "过拟合标本 · 唐宋 200 万步",
+    note: "同一炉跑到头，val 从 4.04 升到 4.41、train 降到 2.82 —— 训练集 loss 好看不代表诗好",
   },
 };
 
 for (const m of Object.values(MODELS)) {
-  m.meta = JSON.parse(Deno.readTextFileSync(`./${m.prefix}.meta.json`));
-  m.bin = Deno.readFileSync(`./${m.prefix}.bin`);
-  console.log(`加载 ${m.name}: ${m.meta.cfg.nLayer}层/${m.meta.cfg.nEmbd}维, step ${m.meta.step}`);
-  m.poet = await createPoet(m.meta, m.bin.buffer, chars);
+  Object.assign(m, await loadModel(m.prefix));    // 字表随模型走的规则在 load-model 里统一处理
+  m.stoi = Object.fromEntries(m.chars.map((c, i) => [c, i]));
+  console.log(`加载 ${m.name}: ${m.meta.cfg.nLayer}层/${m.meta.cfg.nEmbd}维, 词表 ${m.chars.length}, step ${m.meta.step}`);
 }
-console.log("GPU 推理就绪（两个模型）");
+console.log("GPU 推理就绪（三个模型）");
 
 const PAGE = `<!DOCTYPE html>
 <html lang="zh">
@@ -72,7 +76,7 @@ const PAGE = `<!DOCTYPE html>
 </head>
 <body>
   <h1>小 诗 机</h1>
-  <div class="sub">零依赖手写 GPT · 5330 万参数 · 35454 首全唐诗<br>训练与推理全程 WebGPU</div>
+  <div class="sub">零依赖手写 GPT · 5500 万参数 · 22.4 万首唐宋诗（1009 万字）<br>训练与推理全程 WebGPU</div>
   <div class="row">
     <input id="start" placeholder="给一个字，或一句诗（如：月 / 故人西辞黄鹤楼）" maxlength="12">
     <button id="go" onclick="gen()">作 诗</button>
@@ -80,11 +84,12 @@ const PAGE = `<!DOCTYPE html>
   <div class="pick" id="pick"></div>
   <div class="mode">
     <label><input type="radio" name="mode" value="server" checked> 服务端 GPU</label>
-    <label><input type="radio" name="mode" value="local"> 浏览器本地推理（首次需下载 213MB 权重）</label>
+    <label><input type="radio" name="mode" value="local"> 浏览器本地推理（首次需下载权重）</label>
     <span id="localState"></span>
   </div>
   <div id="out"></div>
   <div class="tip">给 1 个字 → 随机创作 | 给一句诗 → 接龙续写（五言/七言自动识别）<br>
+    推理带重复惩罚 2.0（已出现的字扣减 logits，标点除外）——它把重复率从 8.7% 压到 1.5%<br>
     本地模式：模型在你浏览器的 GPU 里运行，断网可用</div>
 <script type="module">
 import { createPoet } from "/webgpu-forward.js";
@@ -94,7 +99,8 @@ const esc = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "
 const models = await (await fetch("/models.json")).json();
 document.getElementById("pick").innerHTML = Object.entries(models).map(([k, m], i) =>
   '<label><input type="radio" name="model" value="' + k + '"' + (i === 0 ? " checked" : "") + '> ' +
-  '<span class="nm">' + esc(m.name) + '</span><br><span class="nt">' + esc(m.note) + '</span></label>').join("");
+  '<span class="nm">' + esc(m.name) + '</span><br><span class="nt">' + esc(m.note) +
+  '<br>词表 ' + m.vocab + ' 字 · 权重 ' + m.mb + 'MB</span></label>').join("");
 const curModel = () => document.querySelector('input[name="model"]:checked').value;
 
 const localPoets = {};                 // 每个模型各缓一份，切回来不用重下
@@ -102,8 +108,8 @@ async function ensureLocal(key) {
   if (localPoets[key]) return localPoets[key];
   const st = document.getElementById("localState");
   st.textContent = "下载词表...";
-  const chars = await (await fetch("/vocab.json")).json();
-  st.textContent = "下载权重 213MB...";
+  const chars = await (await fetch("/vocab.json?model=" + key)).json();   // 字表必须跟模型走
+  st.textContent = "下载权重 " + models[key].mb + "MB...";
   const meta = await (await fetch("/model.meta.json?model=" + key)).json();
   const bin = await (await fetch("/model.bin?model=" + key)).arrayBuffer();
   st.textContent = "初始化 GPU...";
@@ -137,7 +143,8 @@ document.getElementById("start").addEventListener("keydown", e => { if (e.key ==
 </body>
 </html>`;
 
-const FORWARD_SRC = Deno.readTextFileSync("./webgpu-forward.js");
+// 浏览器本地模式要把推理模块原文发过去；路径跟模块走，不看进程当前目录
+const FORWARD_SRC = Deno.readTextFileSync(new URL("./webgpu-forward.js", import.meta.url));
 
 // 全服务只有一份显存缓冲，并发请求必须排队，否则会互相踩激活值
 let tail = Promise.resolve();
@@ -155,9 +162,9 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
     const start = (url.searchParams.get("start") || "").trim().slice(0, 12) || "月";
     const count = Math.min(Number(url.searchParams.get("count")) || 3, 5);
     const m = MODELS[url.searchParams.get("model")] || MODELS.gen;
-    const bad = [...start].filter((c) => !(c in stoi));
+    const bad = [...start].filter((c) => !(c in m.stoi));   // 词表按模型走
     if (bad.length) {
-      return Response.json({ error: `「${bad.join("、")}」不在词表中，换个字试试` });
+      return Response.json({ error: `「${bad.join("、")}」不在该模型的词表中（认识 ${m.chars.length} 个字），换个字试试` });
     }
     const t0 = Date.now();
     const poems = await enqueue(() => m.poet.generateBatch(start, count));
@@ -168,11 +175,14 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
     return new Response(FORWARD_SRC, { headers: { "content-type": "application/javascript; charset=utf-8" } });
   }
   if (p === "/vocab.json") {
-    return Response.json(chars);
+    return Response.json((MODELS[url.searchParams.get("model")] || MODELS.gen).chars);
   }
   if (p === "/models.json") {
     return Response.json(Object.fromEntries(
-      Object.entries(MODELS).map(([k, m]) => [k, { name: m.name, note: m.note, step: m.meta.step }]),
+      Object.entries(MODELS).map(([k, m]) => [k, {
+        name: m.name, note: m.note, step: m.meta.step,
+        vocab: m.chars.length, mb: Math.round(m.bin.byteLength / 1048576),
+      }]),
     ));
   }
   if (p === "/model.meta.json") {

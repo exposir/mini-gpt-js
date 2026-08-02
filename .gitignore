@@ -1,9 +1,13 @@
-# 权重文件（训练产物，体积大；*.json 也超 GitHub 100MB 限制）
-*.bin
+# 权重文件（训练产物，单个 210MB，超 GitHub 100MB 限制）
+weights/*.bin
+weights/*.meta.json
 poet-weights*.json
 poet-weights*.bak
+# 曲线 CSV 要留在仓库里 —— 它是实验结论的原始数据
+!weights/*-curve.csv
 
 # 日志与临时文件
+logs/
 *.log
 *.bak
 

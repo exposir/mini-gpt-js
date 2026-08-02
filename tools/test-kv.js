@@ -1,15 +1,15 @@
 // test-kv.js —— KV Cache 正确性对拍 + 速度对比
 import { createRequire } from "node:module";
-import { createPoet } from "./webgpu-forward.js";
+import { createPoet } from "../gpu/webgpu-forward.js";
 const require = createRequire(import.meta.url);
 
-const POEMS = require("./poems.js");
+const POEMS = require("../data/poems.js");
 const chars = [...new Set("\n" + POEMS.join("\n") + "\n")].sort();
 const stoi = Object.fromEntries(chars.map((c, i) => [c, i]));
 const enc = (s) => [...s].map((c) => stoi[c]);
 
-const meta = JSON.parse(Deno.readTextFileSync("./poet-weights.meta.json"));
-const bin = Deno.readFileSync("./poet-weights.bin");
+const meta = JSON.parse(Deno.readTextFileSync(new URL("../weights/poet-weights.meta.json", import.meta.url)));
+const bin = Deno.readFileSync(new URL("../weights/poet-weights.bin", import.meta.url));
 const poet = await createPoet(meta, bin.buffer, chars);
 console.log("GPU 就绪\n");
 

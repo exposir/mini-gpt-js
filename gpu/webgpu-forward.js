@@ -257,19 +257,42 @@ var<workgroup> red: array<f32, 64>;
 
 // sample: GPU 端 top-k 采样，结果直接写回 ids —— 每 workgroup 一个 batch 项
 //   a=V b=topK c=pos d2=mode(0=温度 1=前两字均匀top4) | F1=logits F2=随机表 OU=ids
-//   64 线程分段各求局部 top-K 再归并（单线程扫 6379 会成为新瓶颈）
+//   64 线程分段各求局部 top-K 再归并（单线程扫全词表会成为新瓶颈）
+//   重复惩罚：本序列已出现的字扣减 logits（F2[rb+73]）。
+//   标点与换行（F2[rb+74..76] 给出的 3 个 id）必预留——它们本就必须反复出现，
+//   惩罚了诗的结构就散了。
 var<workgroup> tv: array<f32, 512>;
 var<workgroup> ti: array<u32, 512>;
+var<workgroup> seen: array<u32, 320>;      // 位图，支持词表 ≤ 10240
 @compute @workgroup_size(64) fn sample(@builtin(workgroup_id) wid: vec3<u32>,
                                        @builtin(local_invocation_id) lid: vec3<u32>) {
   let bi = wid.x;
   let lb = bi * d.a;
   let K = d.b;
+  let rb0 = bi * 80u;
+  let nw = (d.a + 31u) / 32u;
+  let pen = select(0.0, F2[rb0 + 73u], nw <= 320u);   // 词表超位图容量则关闭惩罚
+
+  for (var w = lid.x; w < 320u; w += 64u) { seen[w] = 0u; }
+  workgroupBarrier();
+  if (lid.x == 0u && pen > 0.0) {
+    for (var p = 0u; p <= d.c; p++) {                 // 标记已生成的字
+      let tk = OU[bi * 72u + p];
+      if (tk < d.a) { seen[tk >> 5u] = seen[tk >> 5u] | (1u << (tk & 31u)); }
+    }
+    for (var q = 74u; q <= 76u; q++) {               // 清掉预留 token 的位
+      let tk = u32(F2[rb0 + q]);
+      if (tk < d.a) { seen[tk >> 5u] = seen[tk >> 5u] & ~(1u << (tk & 31u)); }
+    }
+  }
+  workgroupBarrier();
+
   var vals: array<f32, 8>;
   var idxs: array<u32, 8>;
   for (var i = 0u; i < K; i++) { vals[i] = -1e30; idxs[i] = 0u; }
   for (var j = lid.x; j < d.a; j += 64u) {
-    let v = F1[lb + j];
+    var v = F1[lb + j];
+    if ((seen[j >> 5u] & (1u << (j & 31u))) != 0u) { v = v - pen; }
     if (v > vals[K - 1u]) {
       var p = K - 1u;
       while (p > 0u && v > vals[p - 1u]) { vals[p] = vals[p - 1u]; idxs[p] = idxs[p - 1u]; p = p - 1u; }
@@ -548,7 +571,11 @@ export async function createPoet(meta, binBuffer, chars) {
   // 批量生成：count 首诗同时推进。派发指令数与 count 无关，
   // 而耗时几乎全在派发开销上 —— 所以出 4 首 ≈ 出 1 首的时间
   const CHUNK = 12;
-  async function generateBatch(start, count = 1, { temperature = 0.6, topK = 5, maxNew = 0 } = {}) {
+  // 重复惩罚预留的 token：换行与标点必须能反复出现（一首七律要用 8 个。）
+  const KEEP = ["\n", "。", "，"].map((c) => (c in stoi ? stoi[c] : 0));
+  // repPenalty 默认 2.0：实测扫参下重复率 8.7% → 1.5%，最贴近真诗的 1.9%。
+  // 再加大（3.0 以上）会比真诗还“多样”，属于过度矫正，开始出现生硬的用字。
+  async function generateBatch(start, count = 1, { temperature = 0.6, topK = 5, maxNew = 0, repPenalty = 2.0 } = {}) {
     const nb = Math.min(count, MAXB);
     const ids0 = encodeS("\n" + start);
     const n0 = ids0.length;
@@ -558,8 +585,10 @@ export async function createPoet(meta, binBuffer, chars) {
     // 每序列独立随机数表（同一 start 也能生成不同的诗）
     const rnd = new Float32Array(MAXB * 80);
     for (let b = 0; b < nb; b++) {
-      for (let i = 0; i < 73; i++) rnd[b * 80 + i] = Math.random();
+      for (let i = 0; i < 72; i++) rnd[b * 80 + i] = Math.random();
       rnd[b * 80 + 72] = 1 / temperature;
+      rnd[b * 80 + 73] = repPenalty;                       // 0 = 关闭惩罚
+      for (let k = 0; k < 3; k++) rnd[b * 80 + 74 + k] = KEEP[k];
     }
     device.queue.writeBuffer(st.rnd, 0, rnd);
     const padded = new Uint32Array(MAXB * IDS);

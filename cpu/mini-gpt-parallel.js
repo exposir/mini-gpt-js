@@ -18,7 +18,7 @@ const fs = require("fs");
 const {
   MiniGPT, CFG, encode, loadWeights, saveWeights, WEIGHTS, backward, crossEntropy,
 } = require("./mini-gpt-poet.js");
-const POEMS = require("./poems.js");
+const POEMS = require("../data/poems.js");
 
 const N_WORKERS = 8;              // 每轮 8 首诗 = 与串行版 batch=8 完全等价
 const BASE_LR = 1e-3;             // 与串行续训版一致

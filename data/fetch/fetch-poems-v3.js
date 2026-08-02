@@ -15,7 +15,7 @@ const fs = require("fs");
 const path = require("path");
 const OpenCC = require("opencc-js");
 
-const OUT = path.join(__dirname, "poems-tangsong.txt");
+const OUT = path.join(__dirname, "../poems-tangsong.txt");
 const toCN = OpenCC.Converter({ from: "t", to: "cn" });
 
 // 宋诗与唐诗同放在 chinese-poetry 的「全唐诗」目录下（该仓库的历史遗留）

@@ -1,4 +1,19 @@
 {
+  "name": "mini-gpt-js",
+  "private": true,
+  "description": "零依赖手写 GPT：纯 JS 实现 Transformer，WebGPU 训练与推理，写唐宋诗",
+  "scripts": {
+    "serve": "deno run --no-code-cache --allow-read --allow-net --allow-env gpu/gpu-server.js 8890",
+    "gen": "deno run --no-code-cache --allow-read --allow-env tools/gen.js",
+    "train": "POET_CORPUS=poems-tangsong.txt deno run --allow-read --allow-write --allow-env gpu/gpu-train.js",
+    "compare": "deno run --no-code-cache --allow-read --allow-env tools/compare-models.js",
+    "probe": "deno run --no-code-cache --allow-read --allow-env tools/probe-memory.js",
+    "score": "deno run --no-code-cache --allow-read --allow-env tools/score-model.js",
+    "tune": "deno run --no-code-cache --allow-read --allow-env tools/tune-penalty.js",
+    "cpu:gen": "node cpu/mini-gpt-poet.js",
+    "cpu:serve": "node cpu/server.js 8888",
+    "fetch": "node data/fetch/fetch-poems-v3.js"
+  },
   "dependencies": {
     "opencc-js": "^1.4.1"
   }
