@@ -16,6 +16,7 @@ const require = createRequire(import.meta.url);
 // 语料、词表、训练/验证切分统一从这里来（切分逻辑单一来源，防止各处抄错）
 // 注意取的是 *_IDX（下标数组），uploadBatch 靠下标去 POEMS 里取诗
 import { POEMS, chars, stoi, encode, TRAIN_IDX as TRAIN, VAL_IDX as VAL, CORPUS_NAME } from "../data/data-split.js";
+import { unpackWeights } from "./unpack-weights.js";
 
 // ---------- 配置 ----------
 const CFG = { vocabSize: chars.length, blockSize: 66, nLayer: 10, nHead: 10, nEmbd: 640 };
@@ -425,6 +426,17 @@ function loadWeightsToGPU() {
     console.error("权重与模型结构不匹配"); Deno.exit(1);
   }
   const raw = Deno.readFileSync(BIN);
+  if (meta.format && meta.format !== "bin-f32") {
+    // 量化权重：解包后逐张量上传。只用于 eval 模式——拿反量化过的权重继续训练
+    // 等于把量化误差当成起点，不是此处该做的事。
+    const slices = unpackWeights(meta, raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
+    params.forEach((p) => {
+      const a = slices[p.name];
+      if (!a || a.length !== p.n) throw new Error(`张量 ${p.name} 长度不符: ${a?.length} vs ${p.n}`);
+      device.queue.writeBuffer(p.w, 0, a.slice());
+    });
+    return meta;
+  }
   let off = raw.byteOffset;
   params.forEach((p) => {
     device.queue.writeBuffer(p.w, 0, raw.buffer, off, p.n * 4);
@@ -709,11 +721,13 @@ console.log(`数据切分 | 训练 ${TRAIN.length} 首 / 验证 ${VAL.length} �
 let startStep = 0;
 let totalSteps = Number(Deno.args[0]) || 300000;
 let haveWeights = false;
+let loadedFormat = "（无）";
 try { Deno.statSync(META); Deno.statSync(BIN); haveWeights = true; } catch { /* 无二进制权重 */ }
 if (haveWeights) {
   console.log("加载存盘权重...");
   const meta = loadWeightsToGPU();
   startStep = meta.step || 0;
+  loadedFormat = meta.format || "bin-f32";
   if (!Deno.args[0] && meta.totalSteps) totalSteps = meta.totalSteps;
   console.log(`续训: ${startStep} → ${totalSteps}`);
 } else {
@@ -808,7 +822,13 @@ async function debugDump() {
 }
 
 // ---------- 训练循环 ----------
-if (startStep >= totalSteps) {
+// 只评估模式：第一个参数传 eval 就只跑一次验证集就退。
+// 重点是“同一段代码”——量化权重想跟 4.0383 对比，就不能另写一份评估。
+if (String(Deno.args[0]).toLowerCase() === "eval") {
+  const val = await evalVal();
+  console.log(`\n验证集 loss = ${val.toFixed(4)}   (${VAL.length} 首留出诗，语料 ${CORPUS_NAME})`);
+  console.log(`权重 ${PREFIX}  step ${startStep}  格式 ${loadedFormat}`);
+} else if (startStep >= totalSteps) {
   console.log("已达目标步数，无需训练");
 } else {
   console.log(`训练 ${startStep} → ${totalSteps}（每步 ${B} 样本）...`);

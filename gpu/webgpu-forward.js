@@ -9,6 +9,7 @@
 //   const poet = await createPoet(meta, binBuffer, chars);
 //   const poem = await poet.generate("月", { temperature: 0.6, topK: 5 });
 // ============================================================
+import { unpackWeights } from "./unpack-weights.js";
 
 const MM_WGSL = /* wgsl */ `
 struct Dims { n: u32, k: u32, m: u32, accum: u32 };
@@ -385,10 +386,7 @@ export async function createPoet(meta, binBuffer, chars) {
   // ---- 权重上显存（ln 的 g/b 拼成一个缓冲，方便单绑定） ----
   const W = {};   // name → GPUBuffer
   {
-    const raw = new Float32Array(binBuffer);
-    let off = 0;
-    const slices = {};
-    for (const t of meta.tensors) { slices[t.name] = raw.subarray(off, off + t.rows * t.cols); off += t.rows * t.cols; }
+    const slices = unpackWeights(meta, binBuffer);   // f32 与 int8 两种格式在这里抹平
     const up = (name, arr) => { const b = buf(arr.length); device.queue.writeBuffer(b, 0, arr.slice()); W[name] = b; };
     up("wte", slices["wte"]); up("wpe", slices["wpe"]);
     const cat = (a, b) => { const r = new Float32Array(a.length + b.length); r.set(a); r.set(b, a.length); return r; };
@@ -568,6 +566,22 @@ export async function createPoet(meta, binBuffer, chars) {
     return next;
   }
 
+  // pick 的变体：先把 forbid 里的 token 打成 -Infinity 再采样。
+  // 体裁约束生成用它来“字数未满时禁采标点”。
+  function pickMasked(logits, forbid, { explore, s, temperature, topK }) {
+    const last = Array.from(logits);
+    for (const f of forbid) last[f] = -Infinity;
+    if (explore && s < 2) {
+      const idx = last.map((v, i) => i).sort((a, b) => last[b] - last[a]).slice(0, 4);
+      return idx[Math.floor(Math.random() * idx.length)];
+    }
+    const idx = last.map((v, i) => i).sort((a, b) => last[b] - last[a]).slice(0, topK);
+    const probs = softmax(idx.map((i) => last[i] / temperature));
+    let r = Math.random(), next = idx[0];
+    for (let i = 0; i < idx.length; i++) { r -= probs[i]; if (r <= 0) { next = idx[i]; break; } }
+    return next;
+  }
+
   // 批量生成：count 首诗同时推进。派发指令数与 count 无关，
   // 而耗时几乎全在派发开销上 —— 所以出 4 首 ≈ 出 1 首的时间
   const CHUNK = 12;
@@ -641,8 +655,9 @@ export async function createPoet(meta, binBuffer, chars) {
 
   const generate = async (start, opts) => (await generateBatch(start, 1, opts))[0];
 
-  // 逐 token 往返版（保留：便于对照延迟开销）
-  async function generateStepwise(start, { temperature = 0.6, topK = 5, maxNew = 0 } = {}) {
+  // 逐 token 往返版：流式输出走这里。onToken(ch) 每出一个字回调一次，
+  // 调用方借此逐字渲染；不传则行为和以前一样（只拿最终结果）。
+  async function generateStepwise(start, { temperature = 0.6, topK = 5, maxNew = 0, onToken } = {}) {
     const ids = encodeS("\n" + start);
     const explore = start.length < 2;
     const maxNewTokens = maxNew || 65 - start.length;
@@ -653,6 +668,39 @@ export async function createPoet(meta, binBuffer, chars) {
       if (next === NL || ids.length >= T) break;
       const pos = ids.length;
       ids.push(next);
+      onToken && onToken(decodeS([next]));
+      device.queue.writeBuffer(st.ids, pos * 4, new Uint32Array([next]));
+      logits = await stepRange(pos, pos);
+    }
+    return decodeS(ids).trim();
+  }
+
+  // 体裁约束生成：强制「每行 per 字、共 lines 行」。
+  // 模型本身不守格律（自由生成会混 4/5/6/7 字），所以在采样层强制：
+  //   字数未满时把标点打成 -Infinity，满 per 字时直接 emit 该行标点。
+  //   标点按格律：奇数句「，」、偶数句「。」（最后一句必是偶数句，以「。」收尾）。
+  // per/lines 例：五绝 5/4、七绝 7/4、五律 5/8、七律 7/8。
+  const COMMA = stoi["，"], PERIOD = stoi["。"];
+  async function generateForm(start, { per = 5, lines = 4 } = {}, { temperature = 0.6, topK = 5, onToken } = {}) {
+    const ids = encodeS("\n" + start);
+    const explore = start.length < 2;
+    const forbid = [COMMA, PERIOD, NL];
+    device.queue.writeBuffer(st.ids, 0, new Uint32Array(ids));
+    let logits = await stepRange(0, ids.length - 1);
+    let line = 0, col = start.length;          // 起句接着用户输入算
+    while (line < lines && ids.length < T) {
+      let next;
+      if (col < per) {
+        next = pickMasked(logits, forbid, { explore, s: ids.length, temperature, topK });
+        col++;
+      } else {
+        next = (line % 2 === 0) ? COMMA : PERIOD;   // 本行满：奇句「，」偶句「。」
+        col = 0;
+        line++;
+      }
+      const pos = ids.length;
+      ids.push(next);
+      onToken && onToken(decodeS([next]));
       device.queue.writeBuffer(st.ids, pos * 4, new Uint32Array([next]));
       logits = await stepRange(pos, pos);
     }
@@ -683,5 +731,5 @@ export async function createPoet(meta, binBuffer, chars) {
   const stepOne = (pos) => stepRange(pos, pos);
   const stepChunk = (from, to) => stepRange(from, to);
 
-  return { generate, generateBatch, generateStepwise, generateFull, logitsAt, logitsKV, stepOne, stepChunk, device, cfg };
+  return { generate, generateBatch, generateStepwise, generateForm, generateFull, logitsAt, logitsKV, stepOne, stepChunk, device, cfg };
 }
