@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>小诗机 · 手写 GPT + WebGPU</title>
+<!-- 静态单模型版（GitHub Pages）：推理全部在你的浏览器 GPU 里，无任何服务端。
+     算法与数据文件由 tools/build-site.js 从 gpu/、data/、weights/ 同步而来，
+     不要在 docs/ 里直接改它们；本页面是静态版专属，可直接维护。 -->
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Songti SC", "STSong", serif; background: #f5f1e8;
+         min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 40px 16px; }
+  h1 { color: #6b4f2e; letter-spacing: 8px; margin-bottom: 8px; }
+  .sub { color: #a08c6e; font-size: 13px; margin-bottom: 24px; text-align: center; line-height: 1.8; }
+  .row { display: flex; gap: 8px; width: 100%; max-width: 460px; margin-bottom: 12px; }
+  input { flex: 1; padding: 12px 16px; font-size: 18px; border: 2px solid #d9c9a8;
+          border-radius: 8px; background: #fffdf7; outline: none; font-family: inherit; }
+  input:focus { border-color: #b08d57; }
+  button { padding: 12px 28px; font-size: 16px; border: none; border-radius: 8px;
+           background: #8a6d3b; color: #fff; cursor: pointer; font-family: inherit; letter-spacing: 4px; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .mode { display: flex; gap: 16px; margin-bottom: 12px; font-size: 13px; color: #8a6d3b; align-items: center; flex-wrap: wrap; justify-content: center; max-width: 460px; }
+  .poem { background: #fffdf7; border: 1px solid #e6d9bd; border-radius: 12px;
+          padding: 20px 28px; margin-bottom: 14px; width: 100%; max-width: 460px;
+          font-size: 20px; line-height: 1.9; color: #4a3a22; text-align: center;
+          box-shadow: 0 2px 8px rgba(140,110,60,.08); animation: fade .5s; }
+  @keyframes fade { from { opacity: 0; transform: translateY(8px); } }
+  .tip { color: #b5a486; font-size: 12px; margin-top: 20px; text-align: center; line-height: 2; }
+  .diag { width: 100%; max-width: 460px; min-height: 22px; margin: -4px 0 12px;
+          display: flex; gap: 4px; align-items: center; flex-wrap: wrap; font-size: 13px; color: #a08c6e; }
+  .ch { display: inline-flex; align-items: baseline; gap: 1px; padding: 1px 5px; border-radius: 4px;
+        background: #efe7d4; color: #6b4f2e; font-size: 16px; }
+  .ch.bad { background: #f6dcd6; color: #a4472e; text-decoration: line-through; }
+  .ch.conv { background: #e4ecdc; color: #4a6b3a; }
+  .ch em { font-size: 11px; font-style: normal; opacity: .7; }
+  .diag .msg { margin-left: 4px; }
+  .diag button.mini { padding: 3px 10px; font-size: 12px; letter-spacing: 1px; background: #a4472e; }
+  select { padding: 5px 10px; font-size: 13px; border: 1px solid #d9c9a8; border-radius: 6px;
+           background: #fffdf7; color: #6b4f2e; font-family: inherit; outline: none; cursor: pointer; }
+  button.export { margin-top: 12px; padding: 5px 16px; font-size: 12px; letter-spacing: 2px;
+                  background: #fffdf7; color: #8a6d3b; border: 1px solid #d9c9a8; border-radius: 6px; }
+  .warn { background: #f6dcd6; color: #a4472e; border-radius: 8px; padding: 12px 20px;
+          max-width: 460px; font-size: 14px; line-height: 1.8; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+  <h1>小 诗 机</h1>
+  <div class="sub">零依赖手写 GPT · 5500 万参数 · 22.4 万首唐宋诗（1009 万字）<br>
+    模型在你浏览器的 GPU 里运行 · 首次下载 53MB 权重后断网可用</div>
+  <div id="warn"></div>
+  <div class="row">
+    <input id="start" placeholder="给一个字，或一句诗（如：月 / 故人西辞黄鹤楼）" maxlength="12">
+    <button id="go" onclick="gen()">作 诗</button>
+  </div>
+  <div class="diag" id="diag"></div>
+  <div class="mode">
+    <span>体裁</span>
+    <select id="form">
+      <option value="">自由（模型自己定）</option>
+      <option value="5-4">五言绝句 · 4句×5字</option>
+      <option value="7-4">七言绝句 · 4句×7字</option>
+      <option value="5-8">五言律诗 · 8句×5字</option>
+      <option value="7-8">七言律诗 · 8句×7字</option>
+    </select>
+    <span style="font-size:12px;color:#a08c6e">选了体裁自动押韵</span>
+    <span id="state" style="font-size:12px"></span>
+  </div>
+  <div id="out"></div>
+  <div class="tip">给 1 个字 → 随机创作 | 给一句诗 → 接龙续写（五言/七言自动识别）<br>
+    繁体输入自动转简 · 生僻字即时标红 · 韵表从 22.4 万首真诗统计而来<br>
+    权重 int8 量化（210MB→53MB，质量损失低于采样误差），存入浏览器缓存，刷新不重下<br>
+    <a href="https://github.com/exposir/mini-gpt-js" style="color:#8a6d3b">GitHub: exposir/mini-gpt-js</a></div>
+<script type="module">
+import { createPoet } from "./webgpu-forward.js";
+import { makeChecker, usable, missing } from "./normalize.js";
+const esc = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const $ = id => document.getElementById(id);
+
+// WebGPU 不可用就直说，别让用户点了作诗才报错
+if (!navigator.gpu) {
+  $("warn").innerHTML = '<div class="warn">这个浏览器不支持 WebGPU。请用 Chrome / Edge 113+ 或 Safari 26+（macOS/iOS 最新版）。</div>';
+  $("go").disabled = true;
+}
+
+// meta 只有 58KB 且自带词表：页面一打开就拉，体检条立即可用；53MB 权重等点了作诗再下
+const meta = await (await fetch("./model.meta.json")).json();
+const T2S = await (await fetch("./t2s.json")).json();
+const stoi = Object.fromEntries(meta.vocab.map((c, i) => [c, i]));
+const check = makeChecker(T2S, stoi);
+
+let dropOK = false;                    // 用户是否已明确同意去掉不认识的字
+function refreshDiag() {
+  const text = $("start").value.trim();
+  if (!text) { $("diag").innerHTML = ""; dropOK = false; return null; }
+  const rep = check(text);
+  const bad = missing(rep);
+  $("diag").innerHTML = rep.map(x =>
+    '<span class="ch' + (x.ok ? (x.converted ? ' conv' : '') : ' bad') + '">' + esc(x.raw) +
+    (x.converted && x.ok ? '<em>→' + esc(x.use) + '</em>' : '') + '</span>').join("") +
+    (bad.length
+      ? '<span class="msg">← 标红的字在 22.4 万首唐宋诗里没出现过</span>' +
+        (usable(rep) ? ' <button class="mini" onclick="dropBad()">去掉它们</button>' : '')
+      : rep.some(x => x.converted) ? '<span class="msg">← 繁体已自动转简</span>' : '');
+  return rep;
+}
+window.dropBad = function () {
+  $("start").value = usable(check($("start").value.trim()));
+  dropOK = true;
+  refreshDiag();
+};
+$("start").addEventListener("input", () => { dropOK = false; refreshDiag(); });
+
+// 53MB 权重存进浏览器 Cache API，刷新不重下；下过一次之后断网可用
+const wcache = "caches" in window ? await caches.open("poet-weights-v1") : null;
+async function fetchCached(url, onProgress) {
+  const hit = wcache && await wcache.match(url);
+  if (hit) return hit.arrayBuffer();
+  const res = await fetch(url);
+  const total = Number(res.headers.get("content-length")) || 0;
+  const reader = res.body.getReader();
+  const chunks = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+    if (onProgress && total) onProgress(got / total);
+  }
+  const buf = new Uint8Array(got);
+  let p = 0;
+  for (const c of chunks) { buf.set(c, p); p += c.length; }
+  if (wcache) await wcache.put(url, new Response(buf, { headers: { "content-type": "application/octet-stream" } }));
+  return buf.buffer;
+}
+
+let poet = null;
+async function ensurePoet() {
+  if (poet) return poet;
+  const st = $("state");
+  const bin = await fetchCached("./model.bin", (f) => {
+    st.textContent = "下载权重 " + Math.round(f * 100) + "%（53MB，只下这一次）";
+  });
+  st.textContent = "初始化 GPU...";
+  const rhyme = await (await fetch("./rhyme.json")).json();
+  poet = await createPoet(meta, bin, null, { rhyme });
+  st.textContent = "就绪 ✓ 断网也能用";
+  return poet;
+}
+
+// ---- 竖排诗笺导出 ----
+function poemToCard(text) {
+  const sents = text.split(/[，。]/).map(s => s.trim()).filter(s => s);
+  const maxLen = Math.max(...sents.map(s => [...s].length));
+  const nCol = sents.length;
+  const fs = nCol >= 8 ? 34 : 40;
+  const gap = 12, lineH = fs + 10, pad = 46;
+  const colW = fs + gap;
+  const w = pad * 2 + nCol * colW;
+  const h = pad * 2 + maxLen * lineH + 40;
+  const c = document.createElement("canvas");
+  c.width = w * 2; c.height = h * 2;
+  const g = c.getContext("2d");
+  g.scale(2, 2);
+  g.fillStyle = "#f5f1e8"; g.fillRect(0, 0, w, h);
+  g.strokeStyle = "#d9c9a8"; g.lineWidth = 2; g.strokeRect(18, 18, w - 36, h - 36);
+  g.fillStyle = "#4a3a22"; g.textAlign = "center"; g.textBaseline = "middle";
+  g.font = fs + 'px "Songti SC","STSong",serif';
+  for (let i = 0; i < nCol; i++) {
+    const x = w - pad - i * colW - colW / 2;
+    const chars = [...sents[i]];
+    for (let j = 0; j < chars.length; j++) g.fillText(chars[j], x, pad + 16 + j * lineH + fs / 2);
+  }
+  g.font = '14px "Songti SC",serif'; g.fillStyle = "#a08c6e"; g.textAlign = "left";
+  g.fillText("小诗机 · 手写 GPT", pad, h - 26);
+  return c;
+}
+function exportCard(text) {
+  poemToCard(text).toBlob((b) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(b);
+    a.download = "诗笺.png";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+}
+window.poemToCard = poemToCard;
+
+window.gen = async function gen() {
+  const btn = $("go"), out = $("out");
+  const raw = $("start").value.trim();
+  const rep = raw ? check(raw) : null;
+  if (rep && missing(rep).length && !dropOK) { refreshDiag(); return; }
+  const start = rep ? (dropOK ? usable(rep) : rep.map(x => x.use).join("")) : "月";
+  const fv = $("form").value;
+  const form = fv ? { per: Number(fv.split("-")[0]), lines: Number(fv.split("-")[1]) } : null;
+  btn.disabled = true; btn.textContent = "推理中";
+  out.innerHTML = "";
+  const els = [0, 1, 2].map(() => { const d = document.createElement("div"); d.className = "poem"; d.dataset.t = ""; out.appendChild(d); return d; });
+  let idx = 0;
+  const paint = (el) => { el.innerHTML = esc(el.dataset.t).replace(/。/g, "。<br>"); };
+  const startPoem = (i) => { idx = i; els[i].dataset.t = start; paint(els[i]); };
+  const feed = (ch) => { els[idx].dataset.t += ch; paint(els[idx]); };
+  try {
+    const p = await ensurePoet();
+    for (let i = 0; i < 3; i++) {
+      startPoem(i);
+      if (form) await p.generateForm(start, form, { onToken: feed });
+      else await p.generateStepwise(start, { onToken: feed });
+    }
+    for (const el of els) {
+      if (!el.dataset.t) continue;
+      const b = document.createElement("button");
+      b.className = "export"; b.textContent = "导出诗笺";
+      b.onclick = () => exportCard(el.dataset.t);
+      el.appendChild(document.createElement("br"));
+      el.appendChild(b);
+    }
+  } catch (e) { out.innerHTML = '<div class="poem">异常：' + esc(String(e.message)) + "</div>"; }
+  finally { btn.disabled = false; btn.textContent = "作 诗"; }
+};
+$("start").addEventListener("keydown", e => { if (e.key === "Enter") window.gen(); });
+</script>
+</body>
+</html>
