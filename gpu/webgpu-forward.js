@@ -351,7 +351,10 @@ function softmax(arr) {
 // chars 可省：新版权重把字表存在 meta.vocab 里，优先用它。
 // 以前由调用方从语料现算字表，一旦语料换了（加宋诗）就与旧权重错位，
 // 输出变乱码且不报错——字表必须随模型走。
-export async function createPoet(meta, binBuffer, chars) {
+// extras.rhyme：押韵邻接表（字→可通押字串，由 data/build-rhyme.js 生成），
+// 只影响 generateForm；不传则体裁生成不管韵。
+export async function createPoet(meta, binBuffer, chars, extras = {}) {
+  const RHYME = extras.rhyme || null;
   const cfg = meta.cfg;
   chars = meta.vocab || chars;
   if (!chars) throw new Error("缺字表：meta 里没有 vocab，调用时也未传入 chars");
@@ -680,18 +683,67 @@ export async function createPoet(meta, binBuffer, chars) {
   //   字数未满时把标点打成 -Infinity，满 per 字时直接 emit 该行标点。
   //   标点按格律：奇数句「，」、偶数句「。」（最后一句必是偶数句，以「。」收尾）。
   // per/lines 例：五绝 5/4、七绝 7/4、五律 5/8、七律 7/8。
+  //
+  // 押韵（createPoet 传了 extras.rhyme 才生效）：
+  //   韵脚 = 偶数句尾字。第一个韵脚在「可押韵字集」内自由采样，它就是锚；
+  //   之后每个韵脚只允许锚的通押邻居（剔除已用韵脚，防偶数句重字）。
+  //   任何一步允许集为空就退回自由采样——宁可偶尔出韵，不能卡死或出怪字。
   const COMMA = stoi["，"], PERIOD = stoi["。"];
+  // 「可押韵字集」：韵表里有邻居的字（3100 个）映射到本词表 token id
+  const RHYME_IDS = RHYME
+    ? new Set(Object.keys(RHYME).map((ch) => stoi[ch]).filter((id) => id !== undefined))
+    : null;
+
+  // pick 的允许式变体：只在 allow 集合内采样（韵脚位置用）。
+  // allow 之外全打 -Infinity；topK 里混进的 -Inf 项经 softmax 概率为 0，采不到。
+  function pickAllowed(logits, allowIds, { temperature, topK }) {
+    const last = Array.from(logits);
+    for (let i = 0; i < last.length; i++) if (!allowIds.has(i)) last[i] = -Infinity;
+    const idx = last.map((v, i) => i).sort((a, b) => last[b] - last[a]).slice(0, topK);
+    if (last[idx[0]] === -Infinity) return -1;   // allow 全体不可用（调用方兜底）
+    const probs = softmax(idx.map((i) => last[i] / temperature));
+    let r = Math.random(), next = idx[0];
+    for (let i = 0; i < idx.length; i++) { r -= probs[i]; if (r <= 0) { next = idx[i]; break; } }
+    return next;
+  }
+
   async function generateForm(start, { per = 5, lines = 4 } = {}, { temperature = 0.6, topK = 5, onToken } = {}) {
     const ids = encodeS("\n" + start);
     const explore = start.length < 2;
     const forbid = [COMMA, PERIOD, NL];
     device.queue.writeBuffer(st.ids, 0, new Uint32Array(ids));
     let logits = await stepRange(0, ids.length - 1);
-    let line = 0, col = start.length;          // 起句接着用户输入算
+    // 起笔可能含标点（整句接龙）：按标点数推算当前行，按最后一段推算当前列
+    const segs = start.split(/([，。])/);
+    let line = segs.filter((s) => s === "，" || s === "。").length;
+    let col = [...(segs[segs.length - 1] || "")].length;
+    let anchor = null;                          // 第一个韵脚字，定全诗的韵
+    const usedRhyme = new Set();                // 已用韵脚，防偶数句重字
     while (line < lines && ids.length < T) {
       let next;
       if (col < per) {
-        next = pickMasked(logits, forbid, { explore, s: ids.length, temperature, topK });
+        const isRhymePos = RHYME_IDS && line % 2 === 1 && col === per - 1;
+        next = -1;
+        if (isRhymePos) {
+          let allow;
+          if (!anchor) {
+            allow = RHYME_IDS;                  // 锚位置：只要「能押得起来」的字
+          } else {
+            allow = new Set();
+            for (const ch of RHYME[anchor] || "") {
+              if (usedRhyme.has(ch)) continue;
+              const id = stoi[ch];
+              if (id !== undefined) allow.add(id);
+            }
+          }
+          if (allow.size) next = pickAllowed(logits, allow, { temperature, topK });
+        }
+        if (next < 0) next = pickMasked(logits, forbid, { explore, s: ids.length, temperature, topK });
+        if (isRhymePos) {
+          const ch = decodeS([next]);
+          if (!anchor) anchor = ch;
+          usedRhyme.add(ch);
+        }
         col++;
       } else {
         next = (line % 2 === 0) ? COMMA : PERIOD;   // 本行满：奇句「，」偶句「。」

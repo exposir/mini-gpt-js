@@ -16,6 +16,10 @@ import { splitForMeta } from "../data/data-split.js";
 
 export const weightPath = (file) => new URL(`../weights/${file}`, import.meta.url);
 
+// 押韵邻接表（语料自举，data/build-rhyme.js 生成）——所有入口统一带上，
+// 这样 gen/score/compare 与服务端的体裁生成行为一致。
+export const RHYME = JSON.parse(Deno.readTextFileSync(new URL("../data/rhyme-map.json", import.meta.url)));
+
 export function readMeta(prefix) {
   return JSON.parse(Deno.readTextFileSync(weightPath(`${prefix}.meta.json`)));
 }
@@ -25,5 +29,5 @@ export async function loadModel(prefix) {
   const bin = Deno.readFileSync(weightPath(`${prefix}.bin`));
   const split = splitForMeta(meta);              // 该权重对应的语料/字表/切分
   const chars = meta.vocab || split.chars;       // 新版权重自带字表，旧版从语料算
-  return { prefix, meta, split, chars, bin, poet: await createPoet(meta, bin.buffer, chars) };
+  return { prefix, meta, split, chars, bin, poet: await createPoet(meta, bin.buffer, chars, { rhyme: RHYME }) };
 }

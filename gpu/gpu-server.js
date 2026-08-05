@@ -8,7 +8,7 @@
 // 启动: deno run --no-code-cache --allow-read --allow-net --allow-env gpu/gpu-server.js [端口]
 // ============================================================
 
-import { loadModel, readMeta, weightPath } from "./load-model.js";
+import { loadModel, readMeta, weightPath, RHYME } from "./load-model.js";
 import { makeChecker, usable, missing } from "../data/normalize.js";
 
 const PORT = Number(Deno.args[0]) || 8888;
@@ -121,6 +121,7 @@ const PAGE = `<!DOCTYPE html>
       <option value="5-8">五言律诗 · 8句×5字</option>
       <option value="7-8">七言律诗 · 8句×7字</option>
     </select>
+    <span style="font-size:12px;color:#a08c6e">选了体裁自动押韵（韵表从 22.4 万首真诗统计而来）</span>
   </div>
   <div id="out"></div>
   <div class="tip">给 1 个字 → 随机创作 | 给一句诗 → 接龙续写（五言/七言自动识别）<br>
@@ -212,7 +213,8 @@ async function ensureLocal(key) {
     st.textContent = "下载权重 " + Math.round(f * 100) + "%（" + models[key].mb + "MB，下次刷新从缓存读）";
   });
   st.textContent = "初始化 GPU...";
-  localPoets[key] = await createPoet(meta, bin, chars);
+  const rhyme = await (await fetch("/rhyme.json")).json();   // 押韵表：体裁生成的韵脚约束
+  localPoets[key] = await createPoet(meta, bin, chars, { rhyme });
   st.textContent = "本地就绪 ✓";
   return localPoets[key];
 }
@@ -395,6 +397,9 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
   }
   if (p === "/t2s.json") {
     return Response.json(T2S);
+  }
+  if (p === "/rhyme.json") {                       // 押韵邻接表：本地模式的韵脚约束
+    return Response.json(RHYME);
   }
   if (p === "/webgpu-forward.js") {
     return new Response(FORWARD_SRC, { headers: { "content-type": "application/javascript; charset=utf-8" } });
